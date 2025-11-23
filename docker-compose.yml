@@ -1,21 +1,21 @@
 version: '3.8'
 services:
-  # 1. Graph Database: Neo4j (เก็บความสัมพันธ์)
+  # 1. Graph Database
   neo4j:
     restart: always
-    image: neo4j:2025.10.1
+    image: neo4j:2025.01.0
     container_name: memory_graph
     ports:
-      - "7474:7474" # HTTP Interface
-      - "7687:7687" # Bolt Connection
+      - "7474:7474"
+      - "7687:7687"
     environment:
-      NEO4J_AUTH: neo4j/xxxxxxxx
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
       NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
       NEO4J_dbms_security_procedures_unrestricted: apoc.*
     volumes:
       - ./data/neo4j:/data
 
-  # 2. Vector Database: Qdrant (เก็บความหมาย/Semantic)
+  # 2. Vector Database
   qdrant:
     restart: unless-stopped
     image: qdrant/qdrant:latest
@@ -25,3 +25,35 @@ services:
       - "6334:6334"
     volumes:
       - ./data/qdrant:/qdrant/storage
+
+  # 3. Backend API (Python Server ของคุณ)
+  backend-ai:
+    build: .
+    container_name: research_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - NEO4J_URL=bolt://neo4j:7687
+      - QDRANT_URL=http://qdrant:6333
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+    depends_on:
+      - neo4j
+      - qdrant
+
+  # 4. Frontend UI
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: research_ui
+    restart: always
+    ports:
+      - "3000:8080" # เข้าเว็บผ่าน port 3000
+    volumes:
+      - ./data/open-webui:/app/backend/data # เก็บแชทไว้ที่โฟลเดอร์ data/open-webui
+    environment:
+      # ตั้งค่าให้มันรู้ว่า backend อยู่ไหน (Optional: ถ้าไม่ติดให้ไปแก้ใน UI)
+      - OPENAI_API_BASE_URL=http://backend-ai:8000/v1
+      - OPENAI_API_KEY=sk-no-key-needed
+    depends_on:
+      - backend-ai
