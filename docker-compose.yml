@@ -32,12 +32,18 @@ services:
     container_name: research_backend
     ports:
       - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./storage_metadata:/app/storage_metadata
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - NEO4J_URL=bolt://neo4j:7687
       - QDRANT_URL=http://qdrant:6333
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # (Optional) ให้ Log แสดงผลทันที ไม่ต้องรอ Buffer
+      - PYTHONUNBUFFERED=1
     depends_on:
       - neo4j
       - qdrant
@@ -51,9 +57,11 @@ services:
       - "3000:8080" # เข้าเว็บผ่าน port 3000
     volumes:
       - ./data/open-webui:/app/backend/data # เก็บแชทไว้ที่โฟลเดอร์ data/open-webui
-    # environment:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
       # ตั้งค่าให้มันรู้ว่า backend อยู่ไหน (Optional: ถ้าไม่ติดให้ไปแก้ใน UI)
-      # - OPENAI_API_BASE_URL=http://backend-ai:8000/v1
-      # - OPENAI_API_KEY=sk-no-key-needed
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
+      - OPENAI_API_KEY=sk-1234
     depends_on:
       - backend-ai

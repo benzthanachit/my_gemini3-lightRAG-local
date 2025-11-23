@@ -7,4 +7,6 @@ llama-index-core
 llama-index-embeddings-ollama
 llama-index-graph-stores-neo4j
 llama-index-vector-stores-qdrant
+llama-index-llms-gemini
+llama-index-embeddings-gemini
 qdrant-client
