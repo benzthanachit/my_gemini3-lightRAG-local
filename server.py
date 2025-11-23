@@ -18,6 +18,7 @@ from llama_index.graph_stores.neo4j import Neo4jGraphStore
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
+from llama_index.core.node_parser import SentenceSplitter
 
 import qdrant_client
 from qdrant_client.http import models
@@ -184,51 +185,64 @@ async def trigger_ingest(request: IngestRequest, background_tasks: BackgroundTas
         try:
             if not os.path.exists(path): return
             
-            # 1. อ่านไฟล์ทั้งหมดในโฟลเดอร์
+            # 1. อ่านไฟล์
             documents = SimpleDirectoryReader(path).load_data()
             if not documents: return
 
-            # 2. โหลดสมุดเช็คชื่อ
+            # 2. โหลดสมุดเช็คชื่อ (Registry Logic เดิม)
             processed_files = load_registry()
-            
-            # 3. คัดกรอง: เอาเฉพาะไฟล์ที่ไม่เคยทำ
             new_docs = []
             new_filenames = set()
             
             for doc in documents:
-                # ดึงชื่อไฟล์จาก Metadata
                 file_name = os.path.basename(doc.metadata.get('file_path', 'unknown'))
-                
                 if file_name not in processed_files:
                     new_docs.append(doc)
                     new_filenames.add(file_name)
-                # ถ้ามีแล้ว ข้ามไปเลย (ไม่ปริ้นให้รก Log)
 
-            # 4. ถ้าไม่มีอะไรใหม่ -> จบงาน
             if not new_docs:
-                print("✅ Everything is up-to-date. No new files to ingest.")
+                print("✅ Everything is up-to-date.")
                 return
 
-            print(f"📄 Found {len(new_docs)} NEW files. Processing...")
+            # --- 👇 ส่วนที่เพิ่มใหม่: คำนวณจำนวน Chunks เพื่อโชว์ให้เราดู 👇 ---
+            parser = SentenceSplitter()
+            nodes = parser.get_nodes_from_documents(new_docs)
+            print(f"📄 Found {len(new_docs)} files. Splitting into {len(nodes)} chunks (Parts)...")
+            print(f"⏳ Estimated time: {len(nodes) * 2} seconds (approx)...") 
+            # -----------------------------------------------------------
 
-            # 5. เริ่ม Ingest (เฉพาะไฟล์ใหม่)
+            # 5. เริ่ม Ingest
             if GLOBAL_INDEX is None:
                 print("🆕 Creating New Index...")
-                GLOBAL_INDEX = VectorStoreIndex.from_documents(new_docs, storage_context=STORAGE_CONTEXT)
-                KnowledgeGraphIndex.from_documents(new_docs, storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True)
+                # เพิ่ม show_progress=True
+                GLOBAL_INDEX = VectorStoreIndex.from_documents(
+                    new_docs, storage_context=STORAGE_CONTEXT, show_progress=True
+                )
+                print("🕸️ Building Graph (This is the slow part)...")
+                KnowledgeGraphIndex.from_documents(
+                    new_docs, storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, 
+                    include_embeddings=True, show_progress=True # <--- เพิ่มตรงนี้
+                )
             else:
                 print("➕ Inserting into Existing Index...")
+                # เพิ่ม show_progress=True
                 for doc in new_docs:
                     GLOBAL_INDEX.insert(doc)
-                    # Graph Insert แบบทีละตัว
-                    KnowledgeGraphIndex.from_documents([doc], storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True)
+                    print(f"   - Vector inserted for {doc.doc_id[:10]}...")
+                    
+                    # Graph Insert
+                    print("   - Building Graph nodes...")
+                    KnowledgeGraphIndex.from_documents(
+                        [doc], storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, 
+                        include_embeddings=True, show_progress=True # <--- เพิ่มตรงนี้
+                    )
 
-            # 6. บันทึกสถานะ
+            # 6. Save
             if not os.path.exists(PERSIST_DIR): os.makedirs(PERSIST_DIR)
             GLOBAL_INDEX.storage_context.persist(persist_dir=PERSIST_DIR)
-            save_registry(new_filenames) # จดชื่อลงสมุด
+            save_registry(new_filenames)
             
-            print(f"✅ Ingestion Complete! Added {len(new_docs)} files.")
+            print(f"✅ Ingestion Complete! Processed {len(nodes)} chunks.")
             
         except Exception as e:
             print(f"❌ Ingestion Failed: {e}")
