@@ -1,0 +1,27 @@
+version: '3.8'
+services:
+  # 1. Graph Database: Neo4j (เก็บความสัมพันธ์)
+  neo4j:
+    restart: always
+    image: neo4j:2025.10.1
+    container_name: memory_graph
+    ports:
+      - "7474:7474" # HTTP Interface
+      - "7687:7687" # Bolt Connection
+    environment:
+      NEO4J_AUTH: neo4j/xxxxxxxx
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    volumes:
+      - ./data/neo4j:/data
+
+  # 2. Vector Database: Qdrant (เก็บความหมาย/Semantic)
+  qdrant:
+    restart: unless-stopped
+    image: qdrant/qdrant:latest
+    container_name: memory_vector
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage

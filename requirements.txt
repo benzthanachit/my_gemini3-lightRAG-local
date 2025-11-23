@@ -1,0 +1,8 @@
+google-genai
+llama-index
+llama-index-core
+llama-index-llms-gemini
+llama-index-embeddings-ollama
+llama-index-graph-stores-neo4j
+llama-index-vector-stores-qdrant
+python-dotenv
