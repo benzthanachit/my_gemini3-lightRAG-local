@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import uvicorn
 from typing import List, Optional
 from pydantic import BaseModel
@@ -12,11 +13,9 @@ from google import genai
 from google.genai import types
 
 # LlamaIndex Imports
-from llama_index.core import SimpleDirectoryReader, KnowledgeGraphIndex, VectorStoreIndex, StorageContext, Settings, Document, load_index_from_storage
+from llama_index.core import SimpleDirectoryReader, KnowledgeGraphIndex, VectorStoreIndex, StorageContext, Settings, load_index_from_storage
 from llama_index.graph_stores.neo4j import Neo4jGraphStore
 from llama_index.vector_stores.qdrant import QdrantVectorStore
-
-# ใช้ Google GenAI ตัวใหม่ (รองรับ Gemini 2.5)
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
 
@@ -32,12 +31,29 @@ NEO4J_PASS = os.getenv("NEO4J_PASSWORD")
 NEO4J_URL = os.getenv("NEO4J_URL", "bolt://localhost:7687")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 PERSIST_DIR = "/app/storage_metadata"
-
-# ตั้งชื่อ Collection ให้ชัดเจน
+REGISTRY_FILE = "/app/storage_metadata/ingested_registry.json" # 👈 ไฟล์สมุดเช็คชื่อ
 COLLECTION_NAME = "research_memory_final"
 
 GLOBAL_INDEX = None
 STORAGE_CONTEXT = None
+
+# --- Helper: จัดการสมุดเช็คชื่อ ---
+def load_registry():
+    if os.path.exists(REGISTRY_FILE):
+        with open(REGISTRY_FILE, 'r', encoding='utf-8') as f:
+            return set(json.load(f))
+    return set()
+
+def save_registry(processed_files):
+    # โหลดของเก่ามาก่อน แล้วรวมกับของใหม่
+    current = load_registry()
+    current.update(processed_files)
+    
+    if not os.path.exists(PERSIST_DIR):
+        os.makedirs(PERSIST_DIR)
+        
+    with open(REGISTRY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(list(current), f, ensure_ascii=False, indent=4)
 
 # --- 2. Lifespan Logic ---
 @asynccontextmanager
@@ -46,7 +62,6 @@ async def lifespan(app: FastAPI):
     print("🚀 Server Starting... Connecting to Databases...")
     
     try:
-        # 1. Setup Models (ใช้ SDK ตัวใหม่)
         print("🔌 Using Gemini Embedding (text-embedding-004)...")
         Settings.embed_model = GoogleGenAIEmbedding(
             model_name="models/text-embedding-004",
@@ -59,36 +74,25 @@ async def lifespan(app: FastAPI):
             api_key=GEMINI_API_KEY
         )
 
-        # 2. Force Check/Create Qdrant Collection (Logic จาก Debug Script)
-        print(f"🛠️ Force checking Qdrant at {QDRANT_URL}...")
+        # Force Check Qdrant
+        print(f"🛠️ Checking Qdrant at {QDRANT_URL}...")
         client = qdrant_client.QdrantClient(url=QDRANT_URL)
-        try:
-            if not client.collection_exists(collection_name=COLLECTION_NAME):
-                print(f"   ⚠️ Collection '{COLLECTION_NAME}' not found. Creating...")
-                client.create_collection(
-                    collection_name=COLLECTION_NAME,
-                    vectors_config=models.VectorParams(
-                        size=768, # text-embedding-004 ขนาด 768
-                        distance=models.Distance.COSINE
-                    )
-                )
-                print("   ✅ Collection Created Successfully!")
-            else:
-                print(f"   ✅ Collection '{COLLECTION_NAME}' already exists.")
-        except Exception as e:
-            print(f"   ❌ Qdrant Init Warning: {e}")
+        if not client.collection_exists(collection_name=COLLECTION_NAME):
+            client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE)
+            )
 
-        # 3. Connect LlamaIndex Components
         graph_store = Neo4jGraphStore(username=NEO4J_USER, password=NEO4J_PASS, url=NEO4J_URL)
         vector_store = QdrantVectorStore(client=client, collection_name=COLLECTION_NAME)
         
         STORAGE_CONTEXT = StorageContext.from_defaults(graph_store=graph_store, vector_store=vector_store)
         print("✅ Database Connected!")
 
-        # 4. Load Memory (พยายามโหลด Vector Index เป็นหลัก)
+        # Load Memory
         if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
             try:
-                print("🔄 Loading existing index from storage...")
+                print("🔄 Loading existing index...")
                 GLOBAL_INDEX = load_index_from_storage(STORAGE_CONTEXT, persist_dir=PERSIST_DIR)
                 print("🎉 Success! Memory Loaded.")
             except Exception:
@@ -108,18 +112,12 @@ app = FastAPI(title="Gemini 3 Research Agent API", openapi_url="/v1/openapi.json
 
 # --- 3. Helper Functions ---
 def retrieve_context(query_text: str):
-    if GLOBAL_INDEX is None:
-        return None
+    if GLOBAL_INDEX is None: return None
     try:
-        # ใช้ Vector Search (Qdrant)
         retriever = GLOBAL_INDEX.as_retriever(similarity_top_k=5)
         nodes = retriever.retrieve(query_text)
-        if not nodes:
-            return None
-        return "\n\n".join([n.get_content() for n in nodes])
-    except Exception as e:
-        print(f"Retrieval Error: {e}")
-        return None
+        return "\n\n".join([n.get_content() for n in nodes]) if nodes else None
+    except Exception: return None
 
 def ask_gemini_thinking(query: str, context: Optional[str] = None):
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -129,43 +127,26 @@ def ask_gemini_thinking(query: str, context: Optional[str] = None):
     )
 
     if context:
-        print(f"💡 Using RAG Mode ({len(context)} chars)")
-        prompt = f"""
-        You are an advanced AI Researcher.
-        Context from database:
-        {context}
-        
-        User Question: {query}
-        Analyze the context deeply using your thinking process.
-        """
+        print(f"💡 Using RAG Mode")
+        prompt = f"Context:\n{context}\n\nUser Question: {query}\nAnalyze deeply."
     else:
         print("🗣️ Using General Chat Mode")
-        prompt = f"""
-        You are Gemini 3. User Question: {query}
-        Answer using general knowledge.
-        """
+        prompt = f"User Question: {query}\nAnswer using general knowledge."
 
     try:
-        response = client.models.generate_content(
-            model="gemini-3-pro-preview",
-            contents=prompt,
-            config=config
-        )
-        thought_text = ""
-        final_answer = ""
+        response = client.models.generate_content(model="gemini-3-pro-preview", contents=prompt, config=config)
+        thought = ""
+        answer = ""
         for part in response.candidates[0].content.parts:
-            if hasattr(part, 'thought') and part.thought:
-                thought_text += part.text
-            else:
-                final_answer += part.text
+            if hasattr(part, 'thought') and part.thought: thought += part.text
+            else: answer += part.text
         
-        full_response = ""
-        if thought_text:
-            full_response += f"> **🧠 Thinking Process:**\n> {thought_text.replace(chr(10), chr(10)+'> ')}\n\n---\n\n"
-        full_response += final_answer
-        return full_response
+        full_resp = ""
+        if thought: full_resp += f"> **🧠 Thinking Process:**\n> {thought.replace(chr(10), chr(10)+'> ')}\n\n---\n\n"
+        full_resp += answer
+        return full_resp
     except Exception as e:
-        return f"Error from Gemini: {str(e)}"
+        return f"Error: {str(e)}"
 
 # --- 4. API Endpoints ---
 class Message(BaseModel):
@@ -184,7 +165,6 @@ async def list_models():
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
     user_query = request.messages[-1].content
-    print(f"📩 Received: {user_query}")
     context_text = retrieve_context(user_query)
     reply = ask_gemini_thinking(user_query, context_text)
     return {
@@ -200,76 +180,61 @@ async def chat_completions(request: ChatRequest):
 async def trigger_ingest(request: IngestRequest, background_tasks: BackgroundTasks):
     def process_ingestion(path):
         global GLOBAL_INDEX
-        print(f"📂 Starting Ingestion from: {path}...")
+        print(f"📂 Check Ingestion from: {path}...")
         try:
             if not os.path.exists(path): return
             
-            # 1. อ่านไฟล์เข้ามาก่อน
+            # 1. อ่านไฟล์ทั้งหมดในโฟลเดอร์
             documents = SimpleDirectoryReader(path).load_data()
             if not documents: return
-            
-            # 2. กำหนด ID ให้ Documents เป็นชื่อไฟล์ (เพื่อให้เช็กซ้ำได้ง่าย)
-            for doc in documents:
-                file_name = os.path.basename(doc.metadata.get('file_path', 'unknown'))
-                doc.id_ = file_name # บังคับใช้ชื่อไฟล์เป็น ID
-            
-            # 3. เช็กไฟล์ซ้ำ (Deduplication Logic)
-            new_documents = []
-            if GLOBAL_INDEX is not None:
-                # ดึงรายการ ID ที่เคยจำไปแล้ว
-                existing_ids = set(GLOBAL_INDEX.docstore.docs.keys())
-                
-                for doc in documents:
-                    if doc.id_ not in existing_ids:
-                        new_documents.append(doc)
-                    else:
-                        print(f"⏭️ Skipping duplicate file: {doc.id_}")
-            else:
-                # ถ้ายังไม่มี Index เลย ก็เอาหมด
-                new_documents = documents
 
-            # 4. ถ้าไม่มีไฟล์ใหม่เลย ก็จบงาน
-            if not new_documents:
-                print("✅ No new files to ingest. Everything is up to date!")
+            # 2. โหลดสมุดเช็คชื่อ
+            processed_files = load_registry()
+            
+            # 3. คัดกรอง: เอาเฉพาะไฟล์ที่ไม่เคยทำ
+            new_docs = []
+            new_filenames = set()
+            
+            for doc in documents:
+                # ดึงชื่อไฟล์จาก Metadata
+                file_name = os.path.basename(doc.metadata.get('file_path', 'unknown'))
+                
+                if file_name not in processed_files:
+                    new_docs.append(doc)
+                    new_filenames.add(file_name)
+                # ถ้ามีแล้ว ข้ามไปเลย (ไม่ปริ้นให้รก Log)
+
+            # 4. ถ้าไม่มีอะไรใหม่ -> จบงาน
+            if not new_docs:
+                print("✅ Everything is up-to-date. No new files to ingest.")
                 return
 
-            print(f"📄 Processing {len(new_documents)} NEW docs...")
+            print(f"📄 Found {len(new_docs)} NEW files. Processing...")
 
-            # 5. ถ้ามีไฟล์ใหม่ -> Ingest (แยกกรณี)
+            # 5. เริ่ม Ingest (เฉพาะไฟล์ใหม่)
             if GLOBAL_INDEX is None:
-                # กรณีสร้างครั้งแรก (Create)
                 print("🆕 Creating New Index...")
-                GLOBAL_INDEX = VectorStoreIndex.from_documents(
-                    new_documents, storage_context=STORAGE_CONTEXT
-                )
-                # สร้าง Graph แยก (ทำแค่ครั้งแรก หรือจะ insert ทีหลังก็ได้)
-                KnowledgeGraphIndex.from_documents(
-                    new_documents, storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True
-                )
+                GLOBAL_INDEX = VectorStoreIndex.from_documents(new_docs, storage_context=STORAGE_CONTEXT)
+                KnowledgeGraphIndex.from_documents(new_docs, storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True)
             else:
-                # กรณีมี Index อยู่แล้ว (Update/Insert)
                 print("➕ Inserting into Existing Index...")
-                for doc in new_documents:
-                    # ยัดลง Vector Store (Qdrant)
+                for doc in new_docs:
                     GLOBAL_INDEX.insert(doc)
-                    
-                    # ยัดลง Graph Store (Neo4j) - สร้าง GraphIndex ชั่วคราวเพื่อ insert ลง DB
-                    # หมายเหตุ: การ insert graph ทีละอันอาจจะช้า แต่ชัวร์
-                    KnowledgeGraphIndex.from_documents(
-                        [doc], storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True
-                    )
+                    # Graph Insert แบบทีละตัว
+                    KnowledgeGraphIndex.from_documents([doc], storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True)
 
-            # 6. Save Metadata ลง Disk
+            # 6. บันทึกสถานะ
             if not os.path.exists(PERSIST_DIR): os.makedirs(PERSIST_DIR)
             GLOBAL_INDEX.storage_context.persist(persist_dir=PERSIST_DIR)
+            save_registry(new_filenames) # จดชื่อลงสมุด
             
-            print(f"✅ Ingestion Complete! Added {len(new_documents)} files.")
+            print(f"✅ Ingestion Complete! Added {len(new_docs)} files.")
             
         except Exception as e:
             print(f"❌ Ingestion Failed: {e}")
 
     background_tasks.add_task(process_ingestion, request.folder_path)
-    return {"status": "Ingestion started", "folder": request.folder_path}
+    return {"status": "Ingestion checked", "folder": request.folder_path}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
