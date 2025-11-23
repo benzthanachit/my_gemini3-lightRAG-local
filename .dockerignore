@@ -1,0 +1,17 @@
+# ไม่ต้องเอาโฟลเดอร์ข้อมูลไป (สำคัญมาก!)
+data/
+data/open-webui/
+data/neo4j/
+data/qdrant/
+
+# ไม่ต้องเอา Environment ของ Python บนเครื่องไป
+.venv/
+venv/
+__pycache__/
+
+# ไม่ต้องเอา Git history ไป
+.git/
+.gitignore
+
+# ไม่ต้องเอาไฟล์ VS Code setting ไป
+.vscode/

@@ -3,7 +3,7 @@ services:
   # 1. Graph Database
   neo4j:
     restart: always
-    image: neo4j:2025.01.0
+    image: neo4j:2025.10.1
     container_name: memory_graph
     ports:
       - "7474:7474"
@@ -51,9 +51,9 @@ services:
       - "3000:8080" # เข้าเว็บผ่าน port 3000
     volumes:
       - ./data/open-webui:/app/backend/data # เก็บแชทไว้ที่โฟลเดอร์ data/open-webui
-    environment:
+    # environment:
       # ตั้งค่าให้มันรู้ว่า backend อยู่ไหน (Optional: ถ้าไม่ติดให้ไปแก้ใน UI)
-      - OPENAI_API_BASE_URL=http://backend-ai:8000/v1
-      - OPENAI_API_KEY=sk-no-key-needed
+      # - OPENAI_API_BASE_URL=http://backend-ai:8000/v1
+      # - OPENAI_API_KEY=sk-no-key-needed
     depends_on:
       - backend-ai

@@ -146,6 +146,19 @@ class IngestRequest(BaseModel):
     folder_path: str = "./data"
 
 # --- 5. API Endpoints ---
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "gemini-3-researcher", 
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "benzondata",
+            }
+        ]
+    }
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
