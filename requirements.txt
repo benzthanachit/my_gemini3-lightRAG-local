@@ -4,9 +4,8 @@ pydantic
 python-dotenv
 google-genai
 llama-index-core
-llama-index-embeddings-ollama
 llama-index-graph-stores-neo4j
 llama-index-vector-stores-qdrant
-llama-index-llms-gemini
-llama-index-embeddings-gemini
+llama-index-llms-google-genai
+llama-index-embeddings-google-genai
 qdrant-client
