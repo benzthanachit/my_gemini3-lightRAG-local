@@ -203,29 +203,67 @@ async def trigger_ingest(request: IngestRequest, background_tasks: BackgroundTas
         print(f"📂 Starting Ingestion from: {path}...")
         try:
             if not os.path.exists(path): return
+            
+            # 1. อ่านไฟล์เข้ามาก่อน
             documents = SimpleDirectoryReader(path).load_data()
             if not documents: return
             
-            print(f"📄 Processing {len(documents)} docs...")
-
-            # 1. [สำคัญมาก] สร้าง Vector Store Index ยัดลง Qdrant โดยตรง
-            # (แยกกับ Graph เพื่อความชัวร์ว่าข้อมูลเข้า)
-            print("embedding into Qdrant (VectorStoreIndex)...")
-            GLOBAL_INDEX = VectorStoreIndex.from_documents(
-                documents, storage_context=STORAGE_CONTEXT
-            )
+            # 2. กำหนด ID ให้ Documents เป็นชื่อไฟล์ (เพื่อให้เช็กซ้ำได้ง่าย)
+            for doc in documents:
+                file_name = os.path.basename(doc.metadata.get('file_path', 'unknown'))
+                doc.id_ = file_name # บังคับใช้ชื่อไฟล์เป็น ID
             
-            # 2. สร้าง Graph Index ลง Neo4j (ทำเสริม)
-            print("building Knowledge Graph (KnowledgeGraphIndex)...")
-            KnowledgeGraphIndex.from_documents(
-                documents, storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True
-            )
+            # 3. เช็กไฟล์ซ้ำ (Deduplication Logic)
+            new_documents = []
+            if GLOBAL_INDEX is not None:
+                # ดึงรายการ ID ที่เคยจำไปแล้ว
+                existing_ids = set(GLOBAL_INDEX.docstore.docs.keys())
+                
+                for doc in documents:
+                    if doc.id_ not in existing_ids:
+                        new_documents.append(doc)
+                    else:
+                        print(f"⏭️ Skipping duplicate file: {doc.id_}")
+            else:
+                # ถ้ายังไม่มี Index เลย ก็เอาหมด
+                new_documents = documents
 
-            # Save Metadata
+            # 4. ถ้าไม่มีไฟล์ใหม่เลย ก็จบงาน
+            if not new_documents:
+                print("✅ No new files to ingest. Everything is up to date!")
+                return
+
+            print(f"📄 Processing {len(new_documents)} NEW docs...")
+
+            # 5. ถ้ามีไฟล์ใหม่ -> Ingest (แยกกรณี)
+            if GLOBAL_INDEX is None:
+                # กรณีสร้างครั้งแรก (Create)
+                print("🆕 Creating New Index...")
+                GLOBAL_INDEX = VectorStoreIndex.from_documents(
+                    new_documents, storage_context=STORAGE_CONTEXT
+                )
+                # สร้าง Graph แยก (ทำแค่ครั้งแรก หรือจะ insert ทีหลังก็ได้)
+                KnowledgeGraphIndex.from_documents(
+                    new_documents, storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True
+                )
+            else:
+                # กรณีมี Index อยู่แล้ว (Update/Insert)
+                print("➕ Inserting into Existing Index...")
+                for doc in new_documents:
+                    # ยัดลง Vector Store (Qdrant)
+                    GLOBAL_INDEX.insert(doc)
+                    
+                    # ยัดลง Graph Store (Neo4j) - สร้าง GraphIndex ชั่วคราวเพื่อ insert ลง DB
+                    # หมายเหตุ: การ insert graph ทีละอันอาจจะช้า แต่ชัวร์
+                    KnowledgeGraphIndex.from_documents(
+                        [doc], storage_context=STORAGE_CONTEXT, max_triplets_per_chunk=2, include_embeddings=True
+                    )
+
+            # 6. Save Metadata ลง Disk
             if not os.path.exists(PERSIST_DIR): os.makedirs(PERSIST_DIR)
             GLOBAL_INDEX.storage_context.persist(persist_dir=PERSIST_DIR)
             
-            print("✅ Ingestion Complete! Qdrant & Neo4j updated.")
+            print(f"✅ Ingestion Complete! Added {len(new_documents)} files.")
             
         except Exception as e:
             print(f"❌ Ingestion Failed: {e}")
